@@ -737,6 +737,13 @@ class BaseCannonModel(object):
         return self.fit(self.normalized_flux, self.normalized_ivar,
             full_output=False)
 
+    def fit_labelled_set_opt(self):
+        """
+        Return the predicted labels of the stars in the labelled set.
+        """
+        return self.fit_opt(self.normalized_flux, self.normalized_ivar,
+            full_output=False)
+
 
     @requires_model_description
     def loo_cross_validation(self, pre_train=None, **kwargs):
@@ -808,5 +815,6 @@ def _chi_sq(theta, design_matrix, data, inv_var, axis=None):
 
     return np.sum(inv_var * residuals**2, axis=axis), \
         2.0 * inv_var * residuals * design_matrix.T
+
 
 
