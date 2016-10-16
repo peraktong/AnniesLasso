@@ -11,6 +11,7 @@ from __future__ import (division, print_function, absolute_import,
 __all__ = ["CannonModel"]
 
 import logging
+from numpy.linalg import inv
 import numpy as np
 import scipy.optimize as op
 import os
@@ -204,6 +205,99 @@ class CannonModel(model.BaseCannonModel):
 
 
     @model.requires_training_wheels
+
+    # By Jason Cao
+    # Input normalized_flux and normalized)ivar
+    # return optimized_flux and optimized_theta
+    def fitting_spectrum_parameters(self,normalized_flux,normalized_ivar):
+        nor = normalized_flux
+        inferred_labels = self.fit_labelled_set()
+        inf = np.dot(self.theta, self.vectorizer(inferred_labels).T).T
+        ivar = normalized_ivar
+        n_pixel = nor[0, :].size
+        n_star = inf[:, 0].size
+        one = np.ones(n_star)
+
+        for pixel in range(0, n_pixel):
+            print("Building matrix",pixel,"{:.2f}%".format(pixel/n_pixel*100))
+            if pixel ==0 :
+                x_data = one
+                y_data = inf[:,pixel]
+                z_data = inf[:,pixel+1]
+
+            elif pixel>0 and pixel < n_pixel-1:
+                x_data = np.c_[x_data,inf[:,pixel-1]]
+                y_data = np.c_[y_data,inf[:,pixel]]
+                z_data = np.c_[z_data,inf[:,pixel+1]]
+
+            elif pixel == n_pixel-1:
+                x_data = np.c_[x_data, inf[:, pixel - 1]]
+                y_data = np.c_[y_data, inf[:, pixel]]
+                z_data = np.c_[z_data, one]
+        # fit
+        # It's not good. let's do it one star each time.
+
+        left = np.zeros((3,3))
+        right = np.zeros(3)
+
+        for p in range(0, n_star):
+
+            x_data_p = x_data[p, :]
+            y_data_p = y_data[p, :]
+            z_data_p = z_data[p, :]
+            nor_p = nor[p, :]
+            ivar_p = ivar[p, :]
+
+            # construct
+            ivar_r = ivar_p.ravel()
+            ni = len(ivar_r)
+            print("calculating parameters",p,"{:.2f}%".format(p/n_star*100))
+            c = np.zeros((ni, ni))
+
+            for i in range(0, ni):
+                c[i, i] = ivar_r[i]
+
+            y = nor_p.ravel()
+            a = np.c_[np.c_[x_data_p.ravel(), y_data_p.ravel()], z_data_p.ravel()]
+            left += np.dot(np.dot(a.T, c), a)
+            right += np.dot(np.dot(a.T,c), y)
+
+
+        parameters = np.dot(inv(left),right)
+
+        opt_flux = (parameters[0]*x_data+parameters[1]*y_data+parameters[2]*z_data)
+        print(parameters[0],parameters[1],parameters[2],parameters[0]+parameters[1]+parameters[2])
+        #save the optimized spectrum
+
+        # optimize theta
+        theta = self.theta.T
+
+        zero = np.zeros(len(theta[:, 0]))
+        # construct theta_xyz
+
+        for pixel in range(0, n_pixel):
+            print("Building theta matrix", pixel, "{:.2f}%".format(pixel / n_pixel * 100))
+            if pixel == 0:
+                theta_x = zero
+                theta_y = theta[:, pixel]
+                theta_z = theta[:, pixel + 1]
+
+            elif pixel > 0 and pixel < n_pixel - 1:
+                theta_x = np.c_[theta_x, theta[:, pixel - 1]]
+                theta_y = np.c_[theta_y, theta[:, pixel]]
+                theta_z = np.c_[theta_z, theta[:, pixel + 1]]
+
+
+            elif pixel == n_pixel - 1:
+                theta_x = np.c_[theta_x, theta[:, pixel - 1]]
+                theta_y = np.c_[theta_y, theta[:, pixel]]
+                theta_z = np.c_[theta_z, zero]
+
+        theta_opt = parameters[0] * theta_x + parameters[1] * theta_y + parameters[2] * theta_z
+        print(parameters)
+        theta_opt = theta_opt.T
+        return opt_flux,theta_opt
+
     def fit(self, normalized_flux, normalized_ivar, initial_labels=None,
         model_lsf=False, model_redshift=False, full_output=False, **kwargs):
         """
@@ -258,13 +352,71 @@ class CannonModel(model.BaseCannonModel):
 
         return (labels, cov, metadata) if full_output else labels
 
+    def fit_opt(self, normalized_flux, normalized_ivar, initial_labels=None,
+            model_lsf=False, model_redshift=False, full_output=False, **kwargs):
+        """
+        Solve the labels for the given normalized fluxes and inverse variances.
+
+        :param normalized_flux:
+            A `(N_star, N_pixels)` shape of normalized fluxes that are on the
+            same dispersion scale as the trained data.
+
+        :param normalized_ivar:
+            The inverse variances of the normalized flux values. This should
+            have the same shape as `normalized_flux`.
+
+        :param initial_labels: [optional]
+            The initial points to optimize from. If not given, only one
+            initialization will be made from the fiducial label point.
+
+        :param model_lsf: [optional]
+            Optionally convolve the spectral model with a Gaussian broadening
+            kernel of unknown width when fitting the data.
+
+        :param model_redshift: [optional]
+            Optionally redshift the spectral model when fitting the data.
+
+        :returns:
+            The labels. If `full_output` is set to True, then a three-length
+            tuple of `(labels, covariance_matrix, metadata)` will be returned.
+        """
+
+        normalized_flux = np.atleast_2d(normalized_flux)
+        normalized_ivar = np.atleast_2d(normalized_ivar)
+        N_spectra = normalized_flux.shape[0]
+
+        if initial_labels is None:
+            initial_labels = self.vectorizer.fiducials
+        initial_labels = np.atleast_2d(initial_labels)
+
+        # Prepare the wrapper function and data.
+        message = None if not kwargs.pop("progressbar", True) \
+            else "Fitting {0} spectra".format(N_spectra)
+
+        # add something
+        inferred_flux_opt,theta_opt = self.fitting_spectrum_parameters(normalized_flux,normalized_ivar)
+
+        f = utils.wrapper(_fit_spectrum,
+                          (self.dispersion, initial_labels, self.vectorizer, theta_opt,
+                           self.s2, model_lsf, model_redshift),
+                          kwargs, N_spectra, message=message)
+
+        args = (normalized_flux, normalized_ivar)
+        mapper = map if self.pool is None else self.pool.map
+        print("OPT")
+
+        labels, cov, metadata = zip(*mapper(f, zip(*args)))
+        labels, cov = (np.array(labels), np.array(cov))
+
+        return (labels, cov, metadata) if full_output else labels
+
 
     @model.requires_training_wheels
     def _set_s2_by_hogg_heuristic(self):
         """
         Set the pixel scatter by Hogg's heuristic.
 
-        See https://github.com/andycasey/AnniesLasso/issues/31 for more details.
+        See https://github.com/andycasey/AnniesLasso_2/issues/31 for more details.
         """
 
         model_flux = self.predict(self.labels_array)
@@ -668,4 +820,6 @@ def _fit_theta(normalized_flux, normalized_ivar, s2, design_matrix):
     theta = np.dot(ATCiAinv, ATY)
 
     return (theta, ATCiAinv, ivar)
+
+
 
