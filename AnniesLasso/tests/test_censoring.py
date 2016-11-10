@@ -9,7 +9,7 @@ import numpy as np
 import unittest
 from collections import namedtuple
 
-from AnniesLasso.censoring import CensorsDict
+from AnniesLasso_2.censoring import CensorsDict
 
 
 class fake_model(object):

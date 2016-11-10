@@ -817,4 +817,3 @@ def _chi_sq(theta, design_matrix, data, inv_var, axis=None):
         2.0 * inv_var * residuals * design_matrix.T
 
 
-

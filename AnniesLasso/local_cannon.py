@@ -16,10 +16,10 @@ from six import string_types
 
 from astropy.table import Table
 
-import AnniesLasso as tc
+import AnniesLasso_2 as tc
 
 
-logger = logging.getLogger("AnniesLasso")
+logger = logging.getLogger("AnniesLasso_2")
 
 _DEFAULT_FILENAME_COLUMN = "FILENAME"
 _DEFAULT_OUTPUT_SUFFIX = "result"

@@ -16,8 +16,11 @@ import numpy as np
 import scipy.optimize as op
 import os
 from scipy.ndimage import gaussian_filter
+# try to use gnumpy
+#import gnumpy as gpu
 
 from . import (model, utils)
+
 
 logger = logging.getLogger(__name__)
 
@@ -207,33 +210,25 @@ class CannonModel(model.BaseCannonModel):
     @model.requires_training_wheels
 
     # By Jason Cao
-    # Input normalized_flux and normalized)ivar
-    # return optimized_flux and optimized_theta
-    def fitting_spectrum_parameters(self,normalized_flux,normalized_ivar):
+
+
+    def fitting_spectrum_parameters(self,normalized_flux,normalized_ivar,inf_flux):
         nor = normalized_flux
-        inferred_labels = self.fit_labelled_set()
-        inf = np.dot(self.theta, self.vectorizer(inferred_labels).T).T
+        inf = inf_flux
         ivar = normalized_ivar
         n_pixel = nor[0, :].size
         n_star = inf[:, 0].size
         one = np.ones(n_star)
 
-        for pixel in range(0, n_pixel):
-            print("Building matrix",pixel,"{:.2f}%".format(pixel/n_pixel*100))
-            if pixel ==0 :
-                x_data = one
-                y_data = inf[:,pixel]
-                z_data = inf[:,pixel+1]
+        # new method for building matrix
+        x_data = np.c_[one,inf]
+        x_data = x_data[:,0:n_pixel]
 
-            elif pixel>0 and pixel < n_pixel-1:
-                x_data = np.c_[x_data,inf[:,pixel-1]]
-                y_data = np.c_[y_data,inf[:,pixel]]
-                z_data = np.c_[z_data,inf[:,pixel+1]]
+        y_data =inf
 
-            elif pixel == n_pixel-1:
-                x_data = np.c_[x_data, inf[:, pixel - 1]]
-                y_data = np.c_[y_data, inf[:, pixel]]
-                z_data = np.c_[z_data, one]
+        z_data = np.c_[inf,one]
+        z_data = z_data[:,1:n_pixel+1]
+
         # fit
         # It's not good. let's do it one star each time.
 
@@ -259,44 +254,306 @@ class CannonModel(model.BaseCannonModel):
 
             y = nor_p.ravel()
             a = np.c_[np.c_[x_data_p.ravel(), y_data_p.ravel()], z_data_p.ravel()]
+
             left += np.dot(np.dot(a.T, c), a)
             right += np.dot(np.dot(a.T,c), y)
 
+        parameters = np.dot(inv(left), right)
+        opt_flux = parameters[0]*x_data+parameters[1]*y_data+parameters[2]*z_data
+        print("finish fitting")
 
-        parameters = np.dot(inv(left),right)
+        # build theta:
+        zero = np.ones(n_pixel)
 
-        opt_flux = (parameters[0]*x_data+parameters[1]*y_data+parameters[2]*z_data)
-        print(parameters[0],parameters[1],parameters[2],parameters[0]+parameters[1]+parameters[2])
-        #save the optimized spectrum
+        theta_x = np.c_[zero,self.theta]
+        theta_x = x_data[:,0:n_pixel]
 
-        # optimize theta
-        theta = self.theta.T
+        theta_y =inf
 
-        zero = np.zeros(len(theta[:, 0]))
-        # construct theta_xyz
+        theta_z = np.c_[self.theta,zero]
+        theta_z = z_data[:,1:n_pixel+1]
 
-        for pixel in range(0, n_pixel):
-            print("Building theta matrix", pixel, "{:.2f}%".format(pixel / n_pixel * 100))
-            if pixel == 0:
-                theta_x = zero
-                theta_y = theta[:, pixel]
-                theta_z = theta[:, pixel + 1]
+        theta_opt = parameters[0]*theta_x+parameters[1]*theta_y+parameters[2]*theta_z
 
-            elif pixel > 0 and pixel < n_pixel - 1:
-                theta_x = np.c_[theta_x, theta[:, pixel - 1]]
-                theta_y = np.c_[theta_y, theta[:, pixel]]
-                theta_z = np.c_[theta_z, theta[:, pixel + 1]]
+        return opt_flux,theta_opt,parameters
 
 
-            elif pixel == n_pixel - 1:
-                theta_x = np.c_[theta_x, theta[:, pixel - 1]]
-                theta_y = np.c_[theta_y, theta[:, pixel]]
-                theta_z = np.c_[theta_z, zero]
+    # return the parameters of each star.
+    # Now the uncertainty of parameters is also calculated
+    # The structure of the uncertainty is each row is aa,ab,ac ba....
+    # so the dimension is 3*3*N, which is a 3 dimension array
+    # use self.uncertainty to store
+    # Now the model
 
-        theta_opt = parameters[0] * theta_x + parameters[1] * theta_y + parameters[2] * theta_z
-        print(parameters)
-        theta_opt = theta_opt.T
-        return opt_flux,theta_opt
+    def fitting_spectrum_parameters_single(self,normalized_flux,normalized_ivar,inf_flux):
+        nor = normalized_flux
+        inf = inf_flux
+        ivar = normalized_ivar
+        n_pixel = nor[0, :].size
+        n_star = inf[:, 0].size
+        one = np.ones(n_star)
+
+        # new method for building matrix
+        x_data = np.c_[one,inf]
+        x_data = x_data[:,0:n_pixel]
+
+        y_data =inf
+
+        z_data = np.c_[inf,one]
+        z_data = z_data[:,1:n_pixel+1]
+
+        self.x_data =x_data
+        self.y_data =y_data
+        self.z_data =z_data
+
+        # fit
+        # It's not good. let's do it one star each time.
+
+        left = np.zeros((3,3))
+        right = np.zeros(3)
+        un = np.zeros((3,3))
+        parameters=np.array([0,1,0])
+        opt_flux = np.ones(n_pixel)
+
+        for p in range(0, n_star):
+
+            x_data_p = x_data[p, :]
+            y_data_p = y_data[p, :]
+            z_data_p = z_data[p, :]
+            nor_p = nor[p, :]
+            ivar_p = ivar[p, :]
+
+            # construct
+            ivar_r = ivar_p.ravel()
+            ni = len(ivar_r)
+            print("calculating parameters",p,"{:.2f}%".format(p/n_star*100))
+            c = np.zeros((ni, ni))
+
+            for i in range(0, ni):
+                c[i, i] = ivar_r[i]
+
+            y = nor_p.ravel()
+            a = np.c_[np.c_[x_data_p.ravel(), y_data_p.ravel()], z_data_p.ravel()]
+
+            left = np.dot(np.dot(a.T, c), a)
+            right = np.dot(np.dot(a.T,c), y)
+
+            un_p = inv(left)
+
+            parameters_p =np.dot(inv(left), right)
+
+            opt_flux = np.vstack((opt_flux,parameters_p[0]*x_data_p+parameters_p[1]*y_data_p+parameters_p[2]*z_data_p))
+            parameters = np.vstack((parameters,parameters_p))
+            print(parameters_p)
+            un = np.dstack((un,un_p))
+        print("finish fitting")
+        # reshape
+        parameters = parameters[1:(n_star+1),:]
+        opt_flux = opt_flux[1:(n_star + 1), :]
+        un = un[:,:,1:(n_star + 1)]
+        self.uncertainty = un
+        self.opt_flux = opt_flux
+
+        # the shape of the uncertainty is 3*3*N
+
+        print(parameters.shape,n_star,opt_flux.shape,un.shape)
+
+        return opt_flux,parameters
+
+
+    def fitting_spectrum_parameters_single_5(self,normalized_flux,normalized_ivar,inf_flux):
+        nor = normalized_flux
+        inf = inf_flux
+        ivar = normalized_ivar
+        n_pixel = nor[0, :].size
+        n_star = inf[:, 0].size
+        one = np.ones(n_star)
+
+        # new method for building matrix
+        l_1 = np.c_[one,inf]
+        l_1 = l_1[:,0:n_pixel]
+
+        l_2 = np.c_[one,l_1]
+        l_2 = l_2[:, 0:n_pixel]
+
+
+        m_0 =inf
+
+        r_1 = np.c_[inf,one]
+        r_1 = r_1[:,1:n_pixel+1]
+
+        r_2 = np.c_[r_1,one]
+        r_2 = r_2[:, 1:n_pixel + 1]
+
+        # fit
+        # It's not good. let's do it one star each time.
+
+        un = np.zeros((5,5))
+        parameters=np.array([0,0,0,0,0])
+        opt_flux = np.ones(n_pixel)
+
+        for p in range(0, n_star):
+
+            l_2_p =l_2[p,:]
+            l_1_p = l_1[p, :]
+            m_0_p = m_0[p, :]
+            r_1_p = r_1[p, :]
+            r_2_p = r_2[p, :]
+
+
+            nor_p = nor[p, :]
+            ivar_p = ivar[p, :]
+
+            # construct
+            ivar_r = ivar_p.ravel()
+            ni = len(ivar_r)
+            print("calculating parameters_5",p,"{:.2f}%".format(p/n_star*100))
+            c = np.zeros((ni, ni))
+
+            for i in range(0, ni):
+                c[i, i] = ivar_r[i]
+
+            y = nor_p.ravel()
+
+            a = np.c_[np.c_[l_2_p.ravel(), l_1_p.ravel()], m_0_p.ravel()]
+            a = np.c_[a,r_1_p.ravel()]
+            a = np.c_[a,r_2_p.ravel()]
+
+
+
+
+            left = np.dot(np.dot(a.T, c), a)
+            right = np.dot(np.dot(a.T,c), y)
+
+            un_p = inv(left)
+
+            parameters_p =np.dot(inv(left), right)
+
+            opt_flux = np.vstack((opt_flux,parameters_p[0]*l_2_p+parameters_p[1]*l_1_p+parameters_p[2]*m_0_p
+                                  +parameters_p[3]*r_1_p+parameters_p[4]*r_2_p))
+            parameters = np.vstack((parameters,np.dot(inv(left), right)))
+            un = np.dstack((un,un_p))
+        print("finish fitting 5 parameters")
+        # reshape
+        parameters = parameters[1:(n_star+1),:]
+        opt_flux = opt_flux[1:(n_star + 1), :]
+        un = un[:,:,1:(n_star + 1)]
+        self.uncertainty = un
+        self.opt_flux = opt_flux
+
+        # the shape of the uncertainty is 3*3*N
+
+        print(parameters.shape,n_star,opt_flux.shape,un.shape)
+
+        return opt_flux,parameters
+
+
+
+    ##
+    # CUDA version fitting parameters
+    # This is a optimized version of your module.
+    # use gnumpy, use CUDA
+
+    def fitting_spectrum_parameters_single_CUDA(self,nor,ivar,inf):
+        n_pixel = nor[0, :].size
+        n_star = inf[:, 0].size
+        one = np.ones(n_star)
+
+        # new method for building matrix
+        x_data = np.c_[one, inf]
+        x_data = x_data[:, 0:n_pixel]
+
+        y_data = inf
+
+        z_data = np.c_[inf, one]
+        z_data = z_data[:, 1:n_pixel + 1]
+
+        # fit
+        # It's not good. let's do it one star each time.
+
+        left = np.zeros((3, 3))
+        right = np.zeros(3)
+        un = np.zeros((3, 3))
+        parameters = np.array([0, 1, 0])
+        opt_flux = np.ones(n_pixel)
+
+        for p in range(0, n_star):
+
+            x_data_p = x_data[p, :]
+            y_data_p = y_data[p, :]
+            z_data_p = z_data[p, :]
+            nor_p = nor[p, :]
+            ivar_p = ivar[p, :]
+
+            # construct
+            ivar_r = ivar_p.ravel()
+            ni = len(ivar_r)
+            print("calculating parameters", p, "{:.2f}%".format(p / n_star * 100))
+            c = np.zeros((ni, ni))
+
+            for i in range(0, ni):
+                c[i, i] = ivar_r[i]
+
+            y = nor_p.ravel()
+            a = np.c_[np.c_[x_data_p.ravel(), y_data_p.ravel()], z_data_p.ravel()]
+
+            left = np.dot(np.dot(a.T, c), a)
+            right = np.dot(np.dot(a.T, c), y)
+
+            un_p = inv(left)
+
+            parameters_p = np.dot(inv(left), right)
+
+            opt_flux = np.vstack(
+                (opt_flux, parameters_p[0] * x_data_p + parameters_p[1] * y_data_p + parameters_p[2] * z_data_p))
+            parameters = np.vstack((parameters, np.dot(inv(left), right)))
+            un = np.dstack((un, un_p))
+        print("finish fitting")
+        # reshape
+        parameters = parameters[1:(n_star + 1), :]
+        opt_flux = opt_flux[1:(n_star + 1), :]
+        un = un[:, :, 1:(n_star + 1)]
+        self.uncertainty = un
+        self.opt_flux = opt_flux
+
+        # the shape of the uncertainty is 3*3*N
+
+        print(parameters.shape, n_star, opt_flux.shape, un.shape)
+
+        return opt_flux, parameters
+
+    # Return delta_chi_squared, which should be bigger than 0
+    def delta_chi_squared(self,normalzied_flux,normalized_ivar,inf_flux):
+        opt_flux = self.opt_flux
+        N_star = len(inf_flux[:,0])
+        delta_chi = []
+
+        for p in range(0, N_star):
+            ivar_r = normalized_ivar[p, :]
+            ni = len(ivar_r)
+
+            c = np.zeros((ni, ni))
+            print("Calculating delta-chi-squared",p,"{:.2f}%".format(p/N_star*100))
+
+            for i in range(0, ni):
+                c[i, i] = ivar_r[i]
+
+            # correct chi-squared
+            a_old = np.dot(np.dot(normalzied_flux[p, :] - inf_flux[p, :], c), (normalzied_flux[p, :] - inf_flux[p, :]).T)
+            a_opt = np.dot(np.dot(normalzied_flux[p, :] - opt_flux[p, :], c), (normalzied_flux[p, :] - opt_flux[p, :]).T)
+            delta_p = a_old-a_opt
+            delta_chi.append(delta_p)
+        delta_chi = np.array(delta_chi)
+
+        return delta_chi
+
+
+
+
+
+
+
+
 
     def fit(self, normalized_flux, normalized_ivar, initial_labels=None,
         model_lsf=False, model_redshift=False, full_output=False, **kwargs):
@@ -394,7 +651,10 @@ class CannonModel(model.BaseCannonModel):
             else "Fitting {0} spectra".format(N_spectra)
 
         # add something
-        inferred_flux_opt,theta_opt = self.fitting_spectrum_parameters(normalized_flux,normalized_ivar)
+        inferred_labels = self.fit_labelled_set()
+        inf = np.dot(self.theta, self.vectorizer(inferred_labels).T).T
+
+        opt_flux,theta_opt,parameters = self.fitting_spectrum_parameters(normalized_flux,normalized_ivar,inf)
 
         f = utils.wrapper(_fit_spectrum,
                           (self.dispersion, initial_labels, self.vectorizer, theta_opt,
@@ -820,6 +1080,4 @@ def _fit_theta(normalized_flux, normalized_ivar, s2, design_matrix):
     theta = np.dot(ATCiAinv, ATY)
 
     return (theta, ATCiAinv, ivar)
-
-
 

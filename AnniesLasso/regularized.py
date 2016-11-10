@@ -124,6 +124,9 @@ class L1RegularizedCannonModel(cannon.CannonModel):
         kwds.update(kwargs)
         super(L1RegularizedCannonModel, self).train(**kwds)
 
+    def check(self):
+        print("Let's rock!")
+
 
 def chi_sq(theta, design_matrix, data, ivar, axis=None, gradient=True):
     """
@@ -134,9 +137,10 @@ def chi_sq(theta, design_matrix, data, ivar, axis=None, gradient=True):
     f = np.sum(ivar * residuals**2, axis=axis)
     if not gradient:
         return f
-
     g = 2.0 * np.dot(design_matrix.T, ivar * residuals)
     return (f, g)
+
+
 
     
 def L1Norm(Q):
@@ -237,6 +241,7 @@ def _fit_regularized_pixel(initial_theta, initial_s2, normalized_flux,
 
     # Is the fiducial theta a better starting point?
     fiducial_theta = np.hstack([1, np.zeros(design_matrix.shape[1] - 1)])
+    # dimension for theta is 1*10 for each pixel
     if func(fiducial_theta, *args)[0] < func(initial_theta, *args)[0]:
         initial_theta = fiducial_theta
 

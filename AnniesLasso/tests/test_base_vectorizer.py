@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from six.moves import cPickle as pickle
 
-from AnniesLasso.vectorizer import base
+from AnniesLasso_2.vectorizer import base
 
 
 class TestBaseVectorizerInitialization(unittest.TestCase):

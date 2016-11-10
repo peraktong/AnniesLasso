@@ -6,7 +6,7 @@ Unit tests for general utility functions.
 """
 
 import unittest
-from AnniesLasso import utils
+from AnniesLasso_2 import utils
 
 
 class TestShortHash(unittest.TestCase):

@@ -41,10 +41,10 @@ def fit(model_filename, spectrum_filenames, threads, clobber, from_filename,
     Fit a series of spectra.
     """
 
-    import AnniesLasso as tc
+    import AnniesLasso_2 as tc
 
     model = tc.load_model(model_filename, threads=threads)
-    logger = logging.getLogger("AnniesLasso")
+    logger = logging.getLogger("AnniesLasso_2")
     assert model.is_trained
 
     chunk_size = kwargs.pop("parallel_chunks", 1000) if threads > 1 else 1
@@ -146,11 +146,11 @@ def train(model_filename, threads, condor, condor_chunks, memory, save_training_
     
     # It's bad practice not to have all the imports up here, 
     # but I want the CLI to be fast if people are just checking out the help.
-    import AnniesLasso as tc
+    import AnniesLasso_2 as tc
 
     # Load the model.
     model = tc.load_model(model_filename, threads=threads)
-    logger = logging.getLogger("AnniesLasso")
+    logger = logging.getLogger("AnniesLasso_2")
     if model.is_trained and not re_train:
         logger.warn("Model loaded from {} is already trained.".format(
             model_filename))
@@ -285,7 +285,7 @@ def join_results(output_filename, result_filenames, model_filename=None,
     Join the test results from multiple files into a single table file.
     """
 
-    import AnniesLasso as tc
+    import AnniesLasso_2 as tc
     from astropy.table import Table, TableColumns
 
     meta_keys = kwargs.pop("meta_keys", {})
@@ -296,7 +296,7 @@ def join_results(output_filename, result_filenames, model_filename=None,
     #    "redshift": nan,
     })
 
-    logger = logging.getLogger("AnniesLasso")
+    logger = logging.getLogger("AnniesLasso_2")
 
     # Does the output filename already exist?
     if os.path.exists(output_filename) and not clobber:
@@ -501,7 +501,7 @@ def main():
     args = parser.parse_args()
     if args.action is None: return
 
-    logger = logging.getLogger("AnniesLasso")
+    logger = logging.getLogger("AnniesLasso_2")
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 

@@ -6,7 +6,7 @@ Unit tests for the polynomial vectorizer.
 """
 
 import unittest
-from AnniesLasso.vectorizer import polynomial
+from AnniesLasso_2.vectorizer import polynomial
 
 class TestIsStructuredLabelVector(unittest.TestCase):
 

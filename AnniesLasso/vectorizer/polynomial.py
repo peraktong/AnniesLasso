@@ -16,7 +16,7 @@ from collections import (Counter, OrderedDict)
 from itertools import combinations_with_replacement
 from six import string_types
 
-from AnniesLasso.vectorizer.base import BaseVectorizer
+from AnniesLasso_2.vectorizer.base import BaseVectorizer
 
 
 class BasePolynomialVectorizer(BaseVectorizer):
