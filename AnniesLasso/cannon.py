@@ -16,8 +16,39 @@ import numpy as np
 import scipy.optimize as op
 import os
 from scipy.ndimage import gaussian_filter
+
+# by Jason
 # try to use gnumpy
-#import gnumpy as gpu
+import math
+import pyopencl as cl
+import numpy as np
+import os
+from pyopencl.tools import get_test_platforms_and_devices
+
+
+def log10(x):
+    return math.log10(x)
+
+# sinc interpolation
+def sinc_interp(x, s, u):
+    """
+    Interpolates x, sampled at "s" instants
+    Output y is sampled at "u" instants ("u" for "upsampled")
+
+    from Matlab:
+    http://phaseportrait.blogspot.com/2008/06/sinc-interpolation-in-matlab.html
+    """
+
+    if len(x) != len(s):
+        print("len(x) should be equal to len(s")
+
+    # Find the period
+    T = s[1] - s[0]
+
+    sincM = np.tile(u, (len(s), 1)) - np.tile(s[:, np.newaxis], (1, len(u)))
+    y = np.dot(x, np.sinc(sincM / T))
+    return y
+
 
 from . import (model, utils)
 
@@ -286,6 +317,17 @@ class CannonModel(model.BaseCannonModel):
     # Now the model
 
     def fitting_spectrum_parameters_single(self,normalized_flux,normalized_ivar,inf_flux):
+
+
+        #at least 2d:
+        normalized_flux = np.atleast_2d(normalized_flux)
+        normalized_ivar = np.atleast_2d(normalized_ivar)
+        inf_flux = np.atleast_2d(inf_flux)
+
+        # do it
+
+
+
         nor = normalized_flux
         inf = inf_flux
         ivar = normalized_ivar
@@ -294,13 +336,13 @@ class CannonModel(model.BaseCannonModel):
         one = np.ones(n_star)
 
         # new method for building matrix
-        x_data = np.c_[one,inf]
-        x_data = x_data[:,0:n_pixel]
+        z_data = np.c_[one,inf]
+        z_data = z_data[:,0:n_pixel]
 
         y_data =inf
 
-        z_data = np.c_[inf,one]
-        z_data = z_data[:,1:n_pixel+1]
+        x_data = np.c_[inf,one]
+        x_data = x_data[:,1:n_pixel+1]
 
         self.x_data =x_data
         self.y_data =y_data
@@ -344,189 +386,153 @@ class CannonModel(model.BaseCannonModel):
 
             opt_flux = np.vstack((opt_flux,parameters_p[0]*x_data_p+parameters_p[1]*y_data_p+parameters_p[2]*z_data_p))
             parameters = np.vstack((parameters,parameters_p))
+
+
             print(parameters_p)
             un = np.dstack((un,un_p))
         print("finish fitting")
         # reshape
         parameters = parameters[1:(n_star+1),:]
         opt_flux = opt_flux[1:(n_star + 1), :]
-        un = un[:,:,1:(n_star + 1)]
-        self.uncertainty = un
+
+        # new method for calculating velocity uncertainty:
+
+        # use gamma!
+        gamma = un[:,:,1:(n_star + 1)]
+
+        # calculate for each star
+        N_star = len(parameters[:,0])
+        RV_un = []
+        for i in range(0,N_star):
+            a = parameters[i,0]
+            b = parameters[i,1]
+            c = parameters[i,2]
+            J = np.array([-(2.*c+b)/(a+b+c)**2., (a-c)/(a+b+c)**2. , (2.*a+b)/(a+b+c)**2.])
+            gamma_i = gamma[:,:,i]
+
+            RV_un.append(4144.68*(np.dot(np.dot(J,gamma_i),J.T))**0.5)
+        RV_un = np.array(RV_un)
+
+        # use gamma!
+        self.un_cov = gamma
+        self.uncertainty = RV_un
         self.opt_flux = opt_flux
 
         # the shape of the uncertainty is 3*3*N
 
-        print(parameters.shape,n_star,opt_flux.shape,un.shape)
+        print(parameters.shape,n_star,opt_flux.shape,RV_un.shape)
 
         return opt_flux,parameters
 
 
-    def fitting_spectrum_parameters_single_5(self,normalized_flux,normalized_ivar,inf_flux):
-        nor = normalized_flux
-        inf = inf_flux
-        ivar = normalized_ivar
-        n_pixel = nor[0, :].size
-        n_star = inf[:, 0].size
-        one = np.ones(n_star)
+    def fitting_abc_labels_meantime_single(self,flux,ivar):
 
-        # new method for building matrix
-        l_1 = np.c_[one,inf]
-        l_1 = l_1[:,0:n_pixel]
+        # input many stars
 
-        l_2 = np.c_[one,l_1]
-        l_2 = l_2[:, 0:n_pixel]
+        theta = self.theta
 
+        # Set the boundary to be 0
+        one = 0 * np.ones(len(theta[0, :]))
 
-        m_0 =inf
+        row = len(theta[:, 0])
 
-        r_1 = np.c_[inf,one]
-        r_1 = r_1[:,1:n_pixel+1]
+        # x
+        theta_x = np.vstack((theta, one))
+        theta_x = theta_x[1:row + 1, :]
 
-        r_2 = np.c_[r_1,one]
-        r_2 = r_2[:, 1:n_pixel + 1]
+        # y
+        theta_y = theta
 
-        # fit
-        # It's not good. let's do it one star each time.
+        # z
 
-        un = np.zeros((5,5))
-        parameters=np.array([0,0,0,0,0])
-        opt_flux = np.ones(n_pixel)
+        theta_z = np.vstack((one, theta))
+        theta_z = theta_z[0, :row]
 
-        for p in range(0, n_star):
-
-            l_2_p =l_2[p,:]
-            l_1_p = l_1[p, :]
-            m_0_p = m_0[p, :]
-            r_1_p = r_1[p, :]
-            r_2_p = r_2[p, :]
-
-
-            nor_p = nor[p, :]
-            ivar_p = ivar[p, :]
-
-            # construct
-            ivar_r = ivar_p.ravel()
-            ni = len(ivar_r)
-            print("calculating parameters_5",p,"{:.2f}%".format(p/n_star*100))
-            c = np.zeros((ni, ni))
-
-            for i in range(0, ni):
-                c[i, i] = ivar_r[i]
-
-            y = nor_p.ravel()
-
-            a = np.c_[np.c_[l_2_p.ravel(), l_1_p.ravel()], m_0_p.ravel()]
-            a = np.c_[a,r_1_p.ravel()]
-            a = np.c_[a,r_2_p.ravel()]
+        # This is a three-label version:
 
 
 
+        vectorizer = self.vectorizer
 
-            left = np.dot(np.dot(a.T, c), a)
-            right = np.dot(np.dot(a.T,c), y)
+        s2 = 0
 
-            un_p = inv(left)
+        adjusted_ivar = ivar / (1. + ivar * s2)
+        adjusted_sigma = np.sqrt(1.0 / adjusted_ivar)
 
-            parameters_p =np.dot(inv(left), right)
+        adjusted_sigma = np.array(adjusted_sigma)
 
-            opt_flux = np.vstack((opt_flux,parameters_p[0]*l_2_p+parameters_p[1]*l_1_p+parameters_p[2]*m_0_p
-                                  +parameters_p[3]*r_1_p+parameters_p[4]*r_2_p))
-            parameters = np.vstack((parameters,np.dot(inv(left), right)))
-            un = np.dstack((un,un_p))
-        print("finish fitting 5 parameters")
-        # reshape
-        parameters = parameters[1:(n_star+1),:]
-        opt_flux = opt_flux[1:(n_star + 1), :]
-        un = un[:,:,1:(n_star + 1)]
-        self.uncertainty = un
-        self.opt_flux = opt_flux
+        # Exclude non-finite points (e.g., points with zero inverse variance
+        # or non-finite flux values, but the latter shouldn't exist anyway).
+        use = np.isfinite(adjusted_sigma * flux)
+        N_labels = vectorizer.scales.size
 
-        # the shape of the uncertainty is 3*3*N
+        # build a function
+        # The first 3 parameters are labels. The last three are abc
+        def f(xdata,*parameters):
 
-        print(parameters.shape,n_star,opt_flux.shape,un.shape)
+            y = parameters[N_labels]*np.dot(theta_x, vectorizer(parameters[:N_labels]).T) + parameters[N_labels+1]*np.dot(theta_y, vectorizer(parameters[:N_labels]).T) + parameters[N_labels+2]*np.dot(theta_z, vectorizer(parameters[:N_labels]).T)
+            y = np.array(y)
+            print(y.shape)
+            return y[use]
 
-        return opt_flux,parameters
+        # key words
+
+        ir = [None,5000,1,-1,0,1,0]
+
+        print(f(*ir))
 
 
 
-    ##
-    # CUDA version fitting parameters
-    # This is a optimized version of your module.
-    # use gnumpy, use CUDA
+        kwds = {
+            "f": f,
+            "xdata": None,
+            "ydata": flux,
+            "sigma": adjusted_sigma,
+            "absolute_sigma": True,
 
-    def fitting_spectrum_parameters_single_CUDA(self,nor,ivar,inf):
-        n_pixel = nor[0, :].size
-        n_star = inf[:, 0].size
-        one = np.ones(n_star)
+            # These get passed through to leastsq:
+            #"Dfun": Dfun,
+            "col_deriv": True,
+            "ftol": 7. / 3 - 4. / 3 - 1,  # Machine precision.
+            "xtol": 7. / 3 - 4. / 3 - 1,  # Machine precision.
+            "gtol": 0.0,
+            "maxfev": 100000,  # MAGIC
+            "epsfcn": None,
+            "factor": 0.1,  # Smallest step size available for gradient approximation
+            "diag": 1.0 / vectorizer.scales
+        }
 
-        # new method for building matrix
-        x_data = np.c_[one, inf]
-        x_data = x_data[:, 0:n_pixel]
+        # scipy opt
 
-        y_data = inf
+        # initial value
 
-        z_data = np.c_[inf, one]
-        z_data = z_data[:, 1:n_pixel + 1]
+        kwds["p0"] = np.array([4678.85000,1.98000000,-1.38500000,0.1,0.8,0.1])
 
-        # fit
-        # It's not good. let's do it one star each time.
+        op_labels, cov = op.curve_fit(**kwds)
 
-        left = np.zeros((3, 3))
-        right = np.zeros(3)
-        un = np.zeros((3, 3))
-        parameters = np.array([0, 1, 0])
-        opt_flux = np.ones(n_pixel)
+        print(op_labels)
 
-        for p in range(0, n_star):
+        return op_labels
 
-            x_data_p = x_data[p, :]
-            y_data_p = y_data[p, :]
-            z_data_p = z_data[p, :]
-            nor_p = nor[p, :]
-            ivar_p = ivar[p, :]
 
-            # construct
-            ivar_r = ivar_p.ravel()
-            ni = len(ivar_r)
-            print("calculating parameters", p, "{:.2f}%".format(p / n_star * 100))
-            c = np.zeros((ni, ni))
 
-            for i in range(0, ni):
-                c[i, i] = ivar_r[i]
 
-            y = nor_p.ravel()
-            a = np.c_[np.c_[x_data_p.ravel(), y_data_p.ravel()], z_data_p.ravel()]
 
-            left = np.dot(np.dot(a.T, c), a)
-            right = np.dot(np.dot(a.T, c), y)
 
-            un_p = inv(left)
 
-            parameters_p = np.dot(inv(left), right)
 
-            opt_flux = np.vstack(
-                (opt_flux, parameters_p[0] * x_data_p + parameters_p[1] * y_data_p + parameters_p[2] * z_data_p))
-            parameters = np.vstack((parameters, np.dot(inv(left), right)))
-            un = np.dstack((un, un_p))
-        print("finish fitting")
-        # reshape
-        parameters = parameters[1:(n_star + 1), :]
-        opt_flux = opt_flux[1:(n_star + 1), :]
-        un = un[:, :, 1:(n_star + 1)]
-        self.uncertainty = un
-        self.opt_flux = opt_flux
 
-        # the shape of the uncertainty is 3*3*N
 
-        print(parameters.shape, n_star, opt_flux.shape, un.shape)
 
-        return opt_flux, parameters
 
     # Return delta_chi_squared, which should be bigger than 0
     def delta_chi_squared(self,normalzied_flux,normalized_ivar,inf_flux):
         opt_flux = self.opt_flux
         N_star = len(inf_flux[:,0])
         delta_chi = []
+
+        chi_old = []
+        chi_new = []
 
         for p in range(0, N_star):
             ivar_r = normalized_ivar[p, :]
@@ -539,11 +545,21 @@ class CannonModel(model.BaseCannonModel):
                 c[i, i] = ivar_r[i]
 
             # correct chi-squared
+
             a_old = np.dot(np.dot(normalzied_flux[p, :] - inf_flux[p, :], c), (normalzied_flux[p, :] - inf_flux[p, :]).T)
             a_opt = np.dot(np.dot(normalzied_flux[p, :] - opt_flux[p, :], c), (normalzied_flux[p, :] - opt_flux[p, :]).T)
+
             delta_p = a_old-a_opt
+
+            chi_old.append(a_old)
+            chi_new.append(a_opt)
             delta_chi.append(delta_p)
         delta_chi = np.array(delta_chi)
+        chi_new = np.array(chi_new)
+        chi_old = np.array(chi_old)
+
+        self.chi_squared = chi_new
+        self.chi_squared_old = chi_old
 
         return delta_chi
 
@@ -557,60 +573,6 @@ class CannonModel(model.BaseCannonModel):
 
     def fit(self, normalized_flux, normalized_ivar, initial_labels=None,
         model_lsf=False, model_redshift=False, full_output=False, **kwargs):
-        """
-        Solve the labels for the given normalized fluxes and inverse variances.
-
-        :param normalized_flux:
-            A `(N_star, N_pixels)` shape of normalized fluxes that are on the 
-            same dispersion scale as the trained data.
-
-        :param normalized_ivar:
-            The inverse variances of the normalized flux values. This should
-            have the same shape as `normalized_flux`.
-
-        :param initial_labels: [optional]
-            The initial points to optimize from. If not given, only one
-            initialization will be made from the fiducial label point.
-
-        :param model_lsf: [optional]
-            Optionally convolve the spectral model with a Gaussian broadening
-            kernel of unknown width when fitting the data.
-
-        :param model_redshift: [optional]
-            Optionally redshift the spectral model when fitting the data.
-
-        :returns:
-            The labels. If `full_output` is set to True, then a three-length
-            tuple of `(labels, covariance_matrix, metadata)` will be returned.
-        """
-        
-        normalized_flux = np.atleast_2d(normalized_flux)
-        normalized_ivar = np.atleast_2d(normalized_ivar)
-        N_spectra = normalized_flux.shape[0]
-
-        if initial_labels is None:
-            initial_labels = self.vectorizer.fiducials
-        initial_labels = np.atleast_2d(initial_labels)
-        
-        # Prepare the wrapper function and data.
-        message = None if not kwargs.pop("progressbar", True) \
-            else "Fitting {0} spectra".format(N_spectra)
-
-        f = utils.wrapper(_fit_spectrum, 
-            (self.dispersion, initial_labels, self.vectorizer, self.theta, 
-                self.s2, model_lsf, model_redshift),
-            kwargs, N_spectra, message=message)
-
-        args = (normalized_flux, normalized_ivar)
-        mapper = map if self.pool is None else self.pool.map
-
-        labels, cov, metadata = zip(*mapper(f, zip(*args)))
-        labels, cov = (np.array(labels), np.array(cov))
-
-        return (labels, cov, metadata) if full_output else labels
-
-    def fit_opt(self, normalized_flux, normalized_ivar, initial_labels=None,
-            model_lsf=False, model_redshift=False, full_output=False, **kwargs):
         """
         Solve the labels for the given normalized fluxes and inverse variances.
 
@@ -650,25 +612,88 @@ class CannonModel(model.BaseCannonModel):
         message = None if not kwargs.pop("progressbar", True) \
             else "Fitting {0} spectra".format(N_spectra)
 
-        # add something
-        inferred_labels = self.fit_labelled_set()
-        inf = np.dot(self.theta, self.vectorizer(inferred_labels).T).T
-
-        opt_flux,theta_opt,parameters = self.fitting_spectrum_parameters(normalized_flux,normalized_ivar,inf)
-
         f = utils.wrapper(_fit_spectrum,
-                          (self.dispersion, initial_labels, self.vectorizer, theta_opt,
-                           self.s2, model_lsf, model_redshift),
-                          kwargs, N_spectra, message=message)
+            (self.dispersion, initial_labels, self.vectorizer, self.theta,
+                self.s2, model_lsf, model_redshift),
+            kwargs, N_spectra, message=message)
 
         args = (normalized_flux, normalized_ivar)
         mapper = map if self.pool is None else self.pool.map
-        print("OPT")
 
         labels, cov, metadata = zip(*mapper(f, zip(*args)))
         labels, cov = (np.array(labels), np.array(cov))
 
         return (labels, cov, metadata) if full_output else labels
+
+    ##### By Jason
+
+    def fit_opt(self, normalized_flux, normalized_ivar, initial_labels,
+        model_lsf=False, model_redshift=False, full_output=False, **kwargs):
+        """
+        Solve the labels for the given normalized fluxes and inverse variances.
+
+        :param normalized_flux:
+            A `(N_star, N_pixels)` shape of normalized fluxes that are on the
+            same dispersion scale as the trained data.
+
+        :param normalized_ivar:
+            The inverse variances of the normalized flux values. This should
+            have the same shape as `normalized_flux`.
+
+        :param initial_labels: [optional]
+            The initial points to optimize from. If not given, only one
+            initialization will be made from the fiducial label point.
+
+        :param model_lsf: [optional]
+            Optionally convolve the spectral model with a Gaussian broadening
+            kernel of unknown width when fitting the data.
+
+        :param model_redshift: [optional]
+            Optionally redshift the spectral model when fitting the data.
+
+        :returns:
+            The labels. If `full_output` is set to True, then a three-length
+            tuple of `(labels, covariance_matrix, metadata)` will be returned.
+        """
+
+        normalized_flux = np.atleast_2d(normalized_flux)
+        normalized_ivar = np.atleast_2d(normalized_ivar)
+        N_spectra = normalized_flux.shape[0]
+
+        """
+
+        if initial_labels is None:
+            initial_labels = self.vectorizer.fiducials
+
+        """
+
+        initial_labels = np.atleast_2d(initial_labels)
+
+        """
+
+        if initial_labels is None:
+            initial_labels = self.vectorizer.fiducials
+
+        else:
+            initial_labels = np.atleast_2d(initial_labels)
+
+
+        """
+
+
+
+        # Prepare the wrapper function and data.
+        message = None if not kwargs.pop("progressbar", True) \
+            else "Fitting {0} spectra".format(N_spectra)
+
+
+
+        result = _fit_spectrum_opt2(normalized_flux,normalized_ivar,self.dispersion, initial_labels, self.vectorizer, self.theta,
+                self.s2, model_lsf, model_redshift)
+
+
+
+        return result
 
 
     @model.requires_training_wheels
@@ -923,8 +948,263 @@ def _fit_spectrum(normalized_flux, normalized_ivar, dispersion, initial_labels,
     
     return (op_labels, cov, meta)
 
+#############
+# By Jason
 
-def _fit_pixel(initial_theta, initial_s2, normalized_flux, normalized_ivar, 
+
+def _fit_spectrum_opt2(normalized_flux, normalized_ivar, dispersion, initial_labels,
+                  vectorizer, theta, s2, model_lsf=False, model_redshift=False, **kwargs):
+    """
+    Fit a single spectrum by least-squared fitting.
+
+    :param normalized_flux:
+        The normalized flux values.
+
+    :param normalized_ivar:
+        The inverse variance array for the normalized fluxes.
+
+    :param dispersion:
+        The dispersion (e.g., wavelength) points for the normalized fluxes.
+
+    :param initial_labels:
+        The point(s) to initialize optimization from.
+
+    :param vectorizer:
+        The vectorizer to use when fitting the data.
+
+    :param theta:
+        The theta coefficients (spectral derivatives) of the trained model.
+
+    :param s2:
+        The pixel scatter (s^2) array for each pixel.
+
+    :param model_lsf: [optional]
+        Convolve the spectral model with a Gaussian kernel at fitting time.
+
+    :param model_redshift: [optional]
+        Allow for a residual redshift in the spectral model at fitting time.
+    """
+
+    adjusted_ivar = normalized_ivar / (1. + normalized_ivar * s2)
+    adjusted_sigma = np.sqrt(1.0 / adjusted_ivar)
+
+    # Exclude non-finite points (e.g., points with zero inverse variance
+    # or non-finite flux values, but the latter shouldn't exist anyway).
+    use = np.isfinite(adjusted_sigma * normalized_flux)
+    N_labels = vectorizer.scales.size
+
+    if not np.any(use):
+        logger.warn("No information in spectrum!")
+        return (np.nan * np.ones(N_labels), None, {
+            "fail_message": "Pixels contained no information"})
+
+    normalized_flux = normalized_flux[use]
+    adjusted_sigma = adjusted_sigma[use]
+
+    max_abs_velocity = abs(kwargs.get("max_abs_velocity", 10))
+
+
+
+    # Check the vectorizer whether it has a derivative built in.
+    if kwargs.get("Dfun", False):
+        try:
+            vectorizer.get_label_vector_derivative(vectorizer.fiducials)
+
+        except NotImplementedError:
+            Dfun = None
+            logger.debug("No label vector derivative available!")
+
+        except:
+            logger.exception("Exception raised when trying to calculate the "
+                             "label vector derivative at the fiducial values:")
+            raise
+
+        else:
+            # Use the label vector derivative.
+            """
+            # Presumably because of the way leastsq works, the adjusted_inv_sigma
+            # does not enter here, otherwise we get incorrect results.
+            Dfun = lambda xdata, l: \
+                np.dot(theta, vectorizer.get_label_vector_derivative(*l)).T[use]
+            """
+            raise NotImplementedError("requires a thinko")
+
+            def Dfun(labels, xdata, ydata, f, adjusted_inv_sigma):
+                return np.dot(theta,
+                              vectorizer.get_label_vector_derivative(labels)).T[:, use]
+    else:
+        Dfun = None
+
+    mean_pixel_scale = 1.0 / np.diff(dispersion).mean()  # px/Angstrom
+
+
+
+    # construct theta_x theta_y and theta_z
+
+
+    # construct theta_xyz
+
+
+
+
+
+
+
+    # Set the boundary to be 0
+    one = 0*np.ones(len(theta[0, :]))
+
+    row = len(theta[:, 0])
+
+    # x
+    theta_x = np.vstack((theta, one))
+    theta_x = theta_x[1:row + 1, :]
+
+    # y
+    theta_y = theta
+
+    # z
+
+    theta_z = np.vstack((one, theta))
+    theta_z = theta_z[0:row,:]
+
+
+    def f_opt(xdata, *parameters):
+
+
+        y = parameters[N_labels]*np.dot(theta_x, vectorizer(parameters[:N_labels]).T)+parameters[N_labels+1]*np.dot(theta_y, vectorizer(parameters[:N_labels]).T)+parameters[N_labels+2]*np.dot(theta_z, vectorizer(parameters[:N_labels]).T)
+
+        y = np.atleast_2d(y)
+
+        y = y[:,0]
+
+        y = np.atleast_2d(y)
+
+
+        # Convolve?
+        if model_lsf:
+            # This will always be the last parameter.
+            y = gaussian_filter(y, abs(parameters[-4]) * mean_pixel_scale)
+
+        # Redshift?
+        if model_redshift:
+            index = -2 if model_lsf else -1
+            v = parameters[index]
+
+            if np.abs(v) >= max_abs_velocity:
+                logger.debug("Returning NaNs because outside of max velocity")
+                return np.nan * np.ones(sum(use))
+
+            y = np.interp(dispersion,
+                          dispersion * (1 + v / 299792.458), y,
+                          left=np.nan, right=np.nan)
+
+        return y[use]
+
+    kwds = {
+        "f": f_opt,
+        "xdata": None,
+        "ydata": normalized_flux,
+        "sigma": adjusted_sigma,
+        "absolute_sigma": True,
+
+        # These get passed through to leastsq:
+        "Dfun": Dfun,
+        "col_deriv": True,
+        "ftol": 7. / 3 - 4. / 3 - 1,  # Machine precision.
+        "xtol": 7. / 3 - 4. / 3 - 1,  # Machine precision.
+        "gtol": 0.0,
+        "maxfev": 100000,  # MAGIC
+        "epsfcn": None,
+        "factor": 0.1,  # Smallest step size available for gradient approximation
+        "diag": 1.0 / vectorizer.scales
+    }
+
+    # Only update the keywords with things that op.curve_fit/op.leastsq expects.
+    for key in set(kwargs).intersection(kwds):
+        if key == "Dfun": continue
+        kwds[key] = kwargs[key]
+
+    results = []
+    a_all = []
+    b_all = []
+    c_all = []
+
+
+    # Jason
+    """
+
+    # add something to the initial labels
+    initial_labels = np.atleast_2d(initial_labels)
+
+    row = len(initial_labels[:,0])
+
+    initial_labels = np.hstack((initial_labels,0*np.ones((row,1))))
+
+    initial_labels = np.hstack((initial_labels, 1*np.ones((row, 1))))
+
+    initial_labels = np.hstack((initial_labels, 0*np.ones((row, 1))))
+
+
+    """
+
+    print("initial labels")
+    print(initial_labels)
+
+    for p0 in np.atleast_2d(initial_labels):
+        kwds["p0"] = list(p0)
+
+
+
+        if model_redshift:
+            kwds["p0"] += [0]
+
+        if model_lsf:
+            kwds["p0"] += [5]  # MAGIC
+
+
+
+
+        try:
+            op_labels, cov = op.curve_fit(**kwds)
+
+            # let's separate a,b,c from labels
+
+            # The are combined together
+            print("simultaneously optimize abc and labels")
+            print(op_labels)
+
+            c20 = op_labels
+            c20_a = cov
+
+        except RuntimeError:
+            logger.exception("Exception in fitting from {}".format(p0))
+            c20 = initial_labels
+            c20_a = []
+            continue
+
+    return c20, c20_a
+
+    # Let's calculate uncertainty of RVs
+"""
+
+
+    a1 = c20[-3]
+    b1 = c20[-2]
+    c1 = c20[-1]
+
+    J = np.array([-(2. * c1 + b1) / (a1 + b1 + c1) ** 2., (a1 - c1) / (a1 + b1 + c1) ** 2., (2. * a1 + b1) / (a1 + b1 + c1) ** 2.])
+
+    gamma_i = cov[3:6,3:6]
+    print(gamma_i)
+
+    c20_a = 4144.68 * (np.dot(np.dot(J, gamma_i), J.T)) ** 0.5
+
+
+"""
+
+
+
+def _fit_pixel(initial_theta, initial_s2, normalized_flux, normalized_ivar,
     design_matrix, fixed_scatter, **kwargs):
     """
     Return the optimal model coefficients and pixel scatter given the normalized
